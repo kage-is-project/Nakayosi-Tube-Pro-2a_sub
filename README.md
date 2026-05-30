@@ -1,62 +1,39 @@
-# 仲良しTube Pro
+# 仲良しTube+ (FastAPI + Invidious)
 
-FastAPI + 軽量バニラJSクライアントで作る、最速・軽量な YouTube フロントエンド。
-Invidious / Piped の公開インスタンスを並列フェッチして、最初に返ってきたレスポンスを採用します。
+元の単一HTMLのUIをそのまま使い、データ取得を FastAPI バックエンド経由で
+Invidious 複数インスタンスへ並列リクエストする構成。**Piped は使用しません。**
 
 ## 構成
 
 ```
-nakayosi-tube-pro/
-├── app/
-│   ├── __init__.py
-│   ├── main.py              # FastAPI エントリ
-│   ├── config.py            # インスタンス一覧
-│   ├── proxy.py             # 並列フェッチ (最速で取得)
-│   └── routers/
-│       ├── __init__.py
-│       ├── api.py           # /api/* (検索/動画/トレンド/チャンネル)
-│       └── pages.py         # SPA fallback (/home, /watch ...)
-├── templates/
-│   └── index.html           # SPA シェル
-├── static/
-│   ├── css/style.css
-│   └── js/
-│       ├── app.js           # ルーター + 状態管理
-│       ├── api.js           # /api/* ラッパー
-│       └── views/
-│           ├── home.js
-│           ├── search.js
-│           ├── watch.js
-│           ├── trending.js
-│           └── channel.js
-├── requirements.txt
-├── render.yaml              # Render.com デプロイ設定
-├── Procfile
-└── runtime.txt
+app/
+  main.py              FastAPI アプリ
+  config.py            Invidious インスタンス一覧
+  proxy.py             並列レース取得 + キャッシュ
+  routers/
+    api.py             /api/inv/{path}  → Invidious プロキシ
+    pages.py           SPA フォールバック (元HTMLを配信)
+templates/
+  index.html           元の 仲良しTube+ HTML (UIそのまま)
+static/                予約 (使用するなら CSS/JS を追加)
 ```
 
-## ルーティング (pushState)
+## 仕組み
 
-旧 `/#/home` → 新 `/home`。全てのハッシュルートを history API に置き換え。
-
-| 旧 (hash) | 新 (pushState) |
-|---|---|
-| `/#/home` | `/home` |
-| `/#/trending` | `/trending` |
-| `/#/search?v=xxx` | `/search?v=xxx` |
-| `/#/watch?v=ID` | `/watch?v=ID` |
-| `/#/@CHID` | `/channel/CHID` |
+1. ブラウザ側で `fetch()` を上書きし、Invidious / CORSプロキシ宛のリクエストを
+   `/api/inv/<path>` に書き換える。Piped 宛は即時失敗させる。
+2. FastAPI 側で `/api/inv/<path>` を受けたら、複数 Invidious インスタンスへ
+   並列リクエストし、**最速の200応答を返す**（60秒キャッシュ）。
 
 ## ローカル実行
 
 ```bash
 pip install -r requirements.txt
 uvicorn app.main:app --reload
-# → http://127.0.0.1:8000/home
+# → http://127.0.0.1:8000/
 ```
 
 ## Render デプロイ
 
-1. このリポジトリを GitHub に push
-2. Render で **New +** → **Blueprint** → リポジトリを選択
-3. `render.yaml` が自動検出され、Free プランでデプロイされます
+`render.yaml` を含む Blueprint。リポジトリを Render に接続して
+"New Blueprint" を選ぶだけ。

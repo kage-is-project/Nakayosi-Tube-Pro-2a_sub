@@ -1,23 +1,23 @@
-"""SPA フォールバック - 全ページ用ルート (/, /home, /watch, /search, /trending, /channel/:id)。"""
+"""元の単一HTMLをそのまま返す（SPA本体）。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
+from pathlib import Path
+
+from fastapi import APIRouter
+from fastapi.responses import FileResponse, HTMLResponse
 
 router = APIRouter()
-templates = Jinja2Templates(directory="templates")
 
-SPA_PATHS = {"home", "watch", "search", "trending", "channel", "mypage"}
-
-
-@router.get("/", include_in_schema=False)
-async def root():
-    return RedirectResponse("/home", status_code=302)
+TEMPLATE = Path(__file__).resolve().parents[2] / "templates" / "index.html"
 
 
-@router.get("/{full_path:path}", response_class=HTMLResponse, include_in_schema=False)
-async def spa(request: Request, full_path: str):
-    # 旧 hash ルートを新ルートへリダイレクト (#/home → /home)
-    # 注: ハッシュはサーバには届かないのでクライアント側でも処理
-    return templates.TemplateResponse("index.html", {"request": request})
+@router.get("/", response_class=HTMLResponse)
+async def index():
+    return FileResponse(TEMPLATE, media_type="text/html; charset=utf-8")
+
+
+# どの URL でも元のHTMLを返す（クライアント側でルーティング）
+@router.get("/{full_path:path}", response_class=HTMLResponse)
+async def spa(full_path: str):
+    # /api と /static は他のルーターが先に拾うのでここには来ない
+    return FileResponse(TEMPLATE, media_type="text/html; charset=utf-8")

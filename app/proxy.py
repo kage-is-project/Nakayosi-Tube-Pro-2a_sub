@@ -1,63 +1,105 @@
-"""並列フェッチユーティリティ - 複数インスタンスに同時リクエストして最速応答を採用。"""
+"""Invidious インスタンスを並列に叩いて最速の正常レスポンスを返す。"""
 from __future__ import annotations
 
 import asyncio
+import random
 import time
-from typing import Any, Iterable
+from typing import Any
 
 import httpx
 
-from .config import CACHE_TTL_SEC, REQUEST_TIMEOUT
+from .config import (
+    CACHE_TTL,
+    INVIDIOUS_INSTANCES,
+    RACE_CONCURRENCY,
+    REQUEST_TIMEOUT,
+)
 
-_cache: dict[str, tuple[float, Any]] = {}
+_cache: dict[str, tuple[float, Any, str]] = {}
+
+_client: httpx.AsyncClient | None = None
+
+
+def get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(
+            timeout=REQUEST_TIMEOUT,
+            follow_redirects=True,
+            http2=False,
+            headers={
+                "User-Agent": "NakayosiTube/1.0 (+fastapi)",
+                "Accept": "application/json,*/*;q=0.8",
+            },
+            limits=httpx.Limits(max_connections=64, max_keepalive_connections=32),
+        )
+    return _client
 
 
 def _cache_get(key: str):
-    item = _cache.get(key)
-    if not item:
+    v = _cache.get(key)
+    if not v:
         return None
-    ts, val = item
-    if time.time() - ts > CACHE_TTL_SEC:
+    ts, data, ctype = v
+    if time.time() - ts > CACHE_TTL:
         _cache.pop(key, None)
         return None
-    return val
+    return data, ctype
 
 
-def _cache_set(key: str, val: Any) -> None:
-    _cache[key] = (time.time(), val)
+def _cache_set(key: str, data: Any, ctype: str) -> None:
+    _cache[key] = (time.time(), data, ctype)
+    if len(_cache) > 512:
+        # 古いものから削除
+        for k, _ in sorted(_cache.items(), key=lambda x: x[1][0])[:128]:
+            _cache.pop(k, None)
 
 
-async def _fetch_one(client: httpx.AsyncClient, url: str) -> Any:
-    r = await client.get(url, timeout=REQUEST_TIMEOUT, follow_redirects=True)
-    r.raise_for_status()
-    return r.json()
+async def _one(instance: str, path: str, params: dict[str, str]) -> tuple[bytes, str]:
+    url = f"{instance.rstrip('/')}/api/v1/{path.lstrip('/')}"
+    client = get_client()
+    r = await client.get(url, params=params)
+    if r.status_code != 200:
+        raise RuntimeError(f"{instance} -> {r.status_code}")
+    ctype = r.headers.get("content-type", "application/json")
+    return r.content, ctype
 
 
-async def race_json(urls: Iterable[str], cache_key: str | None = None) -> Any:
-    """与えられた URL 群に並列リクエストし、最初に成功したレスポンスを返す。"""
-    if cache_key:
-        cached = _cache_get(cache_key)
-        if cached is not None:
-            return cached
+async def race_invidious(path: str, params: dict[str, str]) -> tuple[bytes, str]:
+    """同一パスを複数 Invidious に並列発射し、最速の正常応答を返す。"""
+    key = f"{path}?{sorted(params.items())}"
+    cached = _cache_get(key)
+    if cached:
+        return cached
 
-    async with httpx.AsyncClient(http2=True, headers={"User-Agent": "NakayosiTubePro/1.0"}) as client:
-        tasks = [asyncio.create_task(_fetch_one(client, u)) for u in urls]
+    instances = INVIDIOUS_INSTANCES.copy()
+    random.shuffle(instances)
+
+    async def runner(inst: str):
+        return await _one(inst, path, params)
+
+    # 波状に投げて最速を採用
+    batch_size = RACE_CONCURRENCY
+    last_err: Exception | None = None
+    for i in range(0, len(instances), batch_size):
+        batch = instances[i : i + batch_size]
+        tasks = [asyncio.create_task(runner(x)) for x in batch]
         try:
-            while tasks:
-                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                for d in done:
-                    tasks.remove(d)
-                    try:
-                        result = d.result()
-                        for p in tasks:
-                            p.cancel()
-                        if cache_key:
-                            _cache_set(cache_key, result)
-                        return result
-                    except Exception:
-                        continue
+            for fut in asyncio.as_completed(tasks):
+                try:
+                    data, ctype = await fut
+                    # 残りをキャンセル
+                    for t in tasks:
+                        if not t.done():
+                            t.cancel()
+                    _cache_set(key, (data, ctype), ctype)
+                    return data, ctype
+                except Exception as e:
+                    last_err = e
+                    continue
         finally:
             for t in tasks:
-                t.cancel()
+                if not t.done():
+                    t.cancel()
 
-    raise RuntimeError("All upstream instances failed")
+    raise RuntimeError(f"all invidious instances failed: {last_err}")
